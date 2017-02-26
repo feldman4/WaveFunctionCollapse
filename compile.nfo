@@ -1,0 +1,1 @@
+mcs -pkg:dotnet /reference:System.Drawing.dll *.cs
