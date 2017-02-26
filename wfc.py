@@ -106,19 +106,17 @@ class SimpleTiledModel(object):
         i,j = coordinates
         a,b = offset
         
-        coeffs1 = np.where(self.wave[:,i,j])[0]
-        coeffs2 = np.where(self.wave[:,a+i,b+j])[0]
+        # do &= ?
+        coeffs1 = self.wave[:,i,j].nonzero()[0]
+        coeffs2 = self.wave[:,a+i,b+j].nonzero()[0]
 
-        changed = 0
-        for k2 in coeffs2:
-                
-            agree = any(self.table[a, b, coeffs1, k2])
+        agree = self.table[a, b][np.ix_(coeffs1, coeffs2)]
+        
+        if agree.ndim == 2:
+            agree = agree.any(axis=0)
 
-            # print 'set ix', (k,a+i,b+j), 'from', self.wave[k,a+i,b+j], 'to', agree
-            
-            if not agree:
-                self.wave[k2,a+i,b+j] = False
-                changed += 1
+        self.wave[coeffs2,a+i,b+j] = agree
+        changed = (~agree).sum()
 
         if changed:
             self.entropy[a+i,b+j] = -1 # flag to recalculate
@@ -165,6 +163,7 @@ class SimpleTiledModel(object):
         collapsed = H == 0
         x = H + collapsed*99999
         minima = zip_where(x==x.min())
+    
         return minima[np.random.choice(len(minima))]
 
     def get_superposition(self, color_map=None):
