@@ -7,22 +7,21 @@ from scipy.ndimage.morphology import binary_erosion
 
 class SimpleTiledModel(object):
     def __init__(self, N, FMX, FMY, initial):
-        self.N = int(N)
-        self.FMX = int(FMX)
-        self.FMY = int(FMY)
+        self.N = N = int(N)
+        self.FMX = FMX = int(FMX)
+        self.FMY = FMY = int(FMY)
 
         initial, weights = zip(*sorted(Counter(initial).items()))
 
+        self.M = M = len(initial)
         self.initial = initial
         self.weights = weights
         self.initial_arr = np.array(initial)
         self.offsets = make_offsets(N)
-        self.table = compatibility_table(initial, self.offsets)
-
-
-        num_colors = len(np.unique(self.initial))
-        self.M = len(initial)
-        self.wave = np.ones((self.M, FMY, FMX), dtype=bool)
+        self.table = compatibility_table(initial, self.offsets, N)
+        
+        self.wave = np.ones((M, FMY, FMX), dtype=bool)
+        self.entropy = self.wave[0] * -1. # cached version
 
     def update(self):
         """Do one round of collapse and propagate. The point to collapse is
@@ -48,22 +47,26 @@ class SimpleTiledModel(object):
         return self.propagate_from([(i,j)])
 
     def propagate_from(self, points):
-
         queue = deque(points)
         modified = 0
+        touched = 0
+        deleted = 0
         while queue:
             (i,j) = queue.popleft()
             neighbors = self.get_neighbors((i,j))
-            neighbors = [(a,b) for a,b in neighbors if sum(self.wave[:,a,b])>1]
+            neighbors = [(a,b) for a,b in neighbors if self.wave[:,a,b].sum()>1]
+            
             for a,b in neighbors:
+                touched += 1
                 changed = self.propagate((i,j), (a-i, b-j))
                 if changed:
                     queue.append((a,b))
                     modified += 1
-                    if sum(self.wave[:,a,b]) == 0:
+                    deleted += changed
+                    if self.wave[:,a,b].sum() == 0:
                         assert False
 
-        print 'propagation modified %d points' % modified
+        print 'propagation deleted %d coefficients in %d points; touched %d points' % (deleted, modified, touched)
 
 
     def get_neighbors(self, (i,j)):
@@ -88,6 +91,7 @@ class SimpleTiledModel(object):
         winner = pick_a_true(coefficients, weights=self.weights)
         self.wave[:,i,j] = False
         self.wave[winner,i,j] = True
+        self.entropy[i,j] = -1 # flag to recalculate
         return i,j
          
     def propagate(self, coordinates, offset):
@@ -102,55 +106,62 @@ class SimpleTiledModel(object):
         i,j = coordinates
         a,b = offset
         
-        # coeffs1 = self.wave[:,i,j].copy()
-        # coeffs2 = self.wave[:,a+i,b+j].copy()
         coeffs1 = np.where(self.wave[:,i,j])[0]
         coeffs2 = np.where(self.wave[:,a+i,b+j])[0]
 
-        # t1s = [self.initial[k] for k,x in enumerate(coeffs1) if x]
-
-        
-        # print (i,j), coeffs1
-        # print (i+a,j+b), coeffs2
-
-        changed = False
+        changed = 0
         for k2 in coeffs2:
                 
-            agree = any(self.table[((a,b), k1, k2)] for k1 in coeffs1)
+            agree = any(self.table[a, b, coeffs1, k2])
 
             # print 'set ix', (k,a+i,b+j), 'from', self.wave[k,a+i,b+j], 'to', agree
             
             if not agree:
                 self.wave[k2,a+i,b+j] = False
-                changed = True
+                changed += 1
+
+        if changed:
+            self.entropy[a+i,b+j] = -1 # flag to recalculate
 
         return changed
 
 
+    def calc_entropy(self, coordinates):
+        i,j = coordinates
+        entropy = 0
 
-    def get_entropy(self):
+        coefficients = self.wave[:,i,j]
+        nnz = sum(coefficients)
+        colors = self.initial_arr[coefficients].reshape(nnz, self.N**2)
+        colors = colors.transpose(1,0)
+        # only take the middle
+        # colors = colors[[(self.N**2)/2],:]
+        for pixel_coefs in colors:
+            entropy += shannon_entropy(pixel_coefs)  
+
+        return entropy
+
+
+    def get_entropy(self, recalculate=True):
         """Given (M x X x Y) boolean wavefunction and initial states, return
         an (X x Y) array of entropy at each position.
         """
-        entropy = self.wave[0] * 0.
-        for i in range(self.FMY):
-            for j in range(self.FMX):
-                coefficients = self.wave[:,i,j]
-                nnz = sum(coefficients)
-                colors = self.initial_arr[coefficients].reshape(nnz, self.N**2)
-                colors = colors.transpose(1,0)
-                # only take the middle
-    #             colors = colors[[(self.N**2)/2],:]
-                for pixel_coefs in colors:
-                    entropy[i,j] += shannon_entropy(pixel_coefs)
+        if recalculate:
+            self.entropy[:] = -1
 
-        return entropy
+        indices = zip_where(self.entropy == -1)
+
+        for i,j in indices:
+            self.entropy[i,j] = self.calc_entropy((i,j))
+
+        return self.entropy
+
 
     def find_lowest_entropy(self):
         """Return the index of the first position with the lowest entropy. 
         Positions with zero entropy (i.e., collapsed) are ignored.
         """
-        H = self.get_entropy()
+        H = self.get_entropy(recalculate=False)
         collapsed = H == 0
         x = H + collapsed*99999
         minima = zip_where(x==x.min())
@@ -247,24 +258,25 @@ def make_offsets(N):
     """
     offsets = []
     for i in range(N):
-        i -= N/2
+        i -= N/2 
         for j in range(N):
             j -= N/2
             if i or j:
                 offsets += [(i,j)]
     return offsets
 
-def compatibility_table(tiles, offsets):
+def compatibility_table(tiles, offsets, N):
     """Determine if two tiles are compatible, after applying a (dI, dJ) offset.
     """
-    d = {}
+    M = len(tiles)
+    table = np.zeros((N, N, M, M), dtype=bool)
     for k1, t1 in enumerate(tiles):
         for k2, t2 in enumerate(tiles):
             for i,j in offsets:
                 agree = (subsquare(t1, i, j) == subsquare(t2, -i, -j)).all()
-                d[((i,j), k1, k2)] = agree
+                table[i, j, k1, k2] = agree
                     
-    return d
+    return table
 
 def zip_where(arr):
     """
