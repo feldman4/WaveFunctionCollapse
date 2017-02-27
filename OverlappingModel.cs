@@ -138,13 +138,15 @@ class OverlappingModel : Model
 
 		for (int x = 0; x < FMX; x++) for (int y = 0; y < FMY; y++) wave[x][y] = new bool[T];
 
+		// compatibility
 		Func<byte[], byte[], int, int, bool> agrees = (p1, p2, dx, dy) =>
 		{
 			int xmin = dx < 0 ? 0 : dx, xmax = dx < 0 ? dx + N : N, ymin = dy < 0 ? 0 : dy, ymax = dy < 0 ? dy + N : N;
 			for (int y = ymin; y < ymax; y++) for (int x = xmin; x < xmax; x++) if (p1[x + N * y] != p2[x - dx + N * (y - dy)]) return false;
 			return true;
 		};
-
+		// propagator <=> compatibility table. 
+		// lists compatible tiles rather than boolean mask. might be faster when most entries in table are false
 		for (int x = 0; x < 2 * N - 1; x++)
 		{
 			propagator[x] = new int[2 * N - 1][][];
@@ -168,10 +170,12 @@ class OverlappingModel : Model
 	{
 		bool change = false, b;
 		int x2, y2;
-
+		// iterate over grid to find t1. doesn't use a queue to track the nodes that are changing.
 		for (int x1 = 0; x1 < FMX; x1++) for (int y1 = 0; y1 < FMY; y1++) if (changes[x1][y1])
 				{
+					// skip unvisited
 					changes[x1][y1] = false;
+					// iterate over neighbors to get t2. neighbor relationship is not abstracted.
 					for (int dx = -N + 1; dx < N; dx++) for (int dy = -N + 1; dy < N; dy++)
 						{
 							x2 = x1 + dx;
@@ -187,13 +191,15 @@ class OverlappingModel : Model
 							bool[] w1 = wave[x1][y1];
 							bool[] w2 = wave[x2][y2];
 							int[][] p = propagator[N - 1 - dx][N - 1 - dy];
-
+							// check each coefficient in t2
 							for (int t2 = 0; t2 < T; t2++)
 							{
 								if (!w2[t2]) continue;
 
 								b = false;
 								int[] prop = p[t2];
+								// prop[i1].any(), if the propagator used boolean mask as storage instead of listing compatible tiles
+
 								for (int i1 = 0; i1 < prop.Length && !b; i1++) b = w1[prop[i1]];
 
 								if (!b)

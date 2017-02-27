@@ -4,12 +4,14 @@ from scipy.ndimage import imread
 from scipy.ndimage.morphology import binary_erosion
 
 
+plog2 = [0] + [x*np.log2(x) for x in range(1,1000)]
 
 class SimpleTiledModel(object):
-    def __init__(self, N, FMX, FMY, initial):
+    def __init__(self, N, FMX, FMY, initial, periodic=False):
         self.N = N = int(N)
         self.FMX = FMX = int(FMX)
         self.FMY = FMY = int(FMY)
+        self.periodic = periodic
 
         initial, weights = zip(*sorted(Counter(initial).items()))
 
@@ -42,11 +44,14 @@ class SimpleTiledModel(object):
 
         i,j = self.collapse()
 
-        print 'collapsed',(i,j)
+        # print 'collapsed',(i,j)
 
         return self.propagate_from([(i,j)])
 
     def propagate_from(self, points):
+        """Propagation strategy is to check all neighbors of a point if the 
+        point is changed. 
+        """
         queue = deque(points)
         modified = 0
         touched = 0
@@ -54,32 +59,34 @@ class SimpleTiledModel(object):
         while queue:
             (i,j) = queue.popleft()
             neighbors = self.get_neighbors((i,j))
-            neighbors = [(a,b) for a,b in neighbors if self.wave[:,a,b].sum()>1]
+            neighbors = [(a,b) for a,b in neighbors if self.wave[:,(i+a) % self.FMY,(j+b) % self.FMX].sum()>1]
             
             for a,b in neighbors:
                 touched += 1
-                changed = self.propagate((i,j), (a-i, b-j))
+                changed = self.propagate((i,j), (a,b))
                 if changed:
-                    queue.append((a,b))
+                    a_, b_ = (i+a)%self.FMY, (j+b)%self.FMX
+                    queue.append((a_,b_))
                     modified += 1
                     deleted += changed
-                    if self.wave[:,a,b].sum() == 0:
+                    if self.wave[:,a_,b_].sum() == 0:
                         assert False
 
-        print 'propagation deleted %d coefficients in %d points; touched %d points' % (deleted, modified, touched)
+        # print 'propagation deleted %d coefficients in %d points; touched %d points' % (deleted, modified, touched)
 
 
     def get_neighbors(self, (i,j)):
-        """Get the neighbors to a point. Returns coordinates, not offsets. 
+        """Get the neighbors to a point. Returns offsets, not coordinates. 
 
         Could implement periodic or other boundary conditions.
         """
+        if self.periodic:
+            return self.offsets
+
         arr = []
         for a,b in self.offsets:
-            a += i
-            b += j
-            if (a >= 0       and b >= 0 and 
-                    a < self.FMY and b < self.FMX):
+            if (a + i >= 0       and b + j >= 0 and 
+                a + i < self.FMY and b + j< self.FMX):
                 arr += [(a,b)]
         return arr
 
@@ -105,21 +112,20 @@ class SimpleTiledModel(object):
 
         i,j = coordinates
         a,b = offset
+        a_,b_ = (a+i) % self.FMY, (b+j) % self.FMX
         
         # do &= ?
         coeffs1 = self.wave[:,i,j].nonzero()[0]
-        coeffs2 = self.wave[:,a+i,b+j].nonzero()[0]
+        coeffs2 = self.wave[:,a_,b_].nonzero()[0]
 
-        agree = self.table[a, b][np.ix_(coeffs1, coeffs2)]
-        
-        if agree.ndim == 2:
-            agree = agree.any(axis=0)
+        # ~2/3 of propagation time spent in this line
+        agree = self.table[a, b][np.ix_(coeffs1, coeffs2)].any(axis=0)
 
-        self.wave[coeffs2,a+i,b+j] = agree
+        self.wave[coeffs2,a_,b_] = agree
         changed = (~agree).sum()
 
         if changed:
-            self.entropy[a+i,b+j] = -1 # flag to recalculate
+            self.entropy[a_,b_] = -1 # flag to recalculate
 
         return changed
 
@@ -128,15 +134,18 @@ class SimpleTiledModel(object):
         i,j = coordinates
         entropy = 0
 
-        coefficients = self.wave[:,i,j]
-        nnz = sum(coefficients)
-        colors = self.initial_arr[coefficients].reshape(nnz, self.N**2)
+        coefficients = self.wave[:,i,j]        
+        colors = self.initial_arr[coefficients].reshape(-1, self.N**2)
         colors = colors.transpose(1,0)
-        # only take the middle
-        # colors = colors[[(self.N**2)/2],:]
-        for pixel_coefs in colors:
-            entropy += shannon_entropy(pixel_coefs)  
 
+        nnz = coefficients.sum()
+
+        for pixel_coefs in colors: 
+            for c in np.bincount(pixel_coefs):
+                entropy -= plog2[c]
+            # entropy += shannon_entropy(pixel_coefs)  
+
+        entropy = entropy/nnz + plog2[nnz]
         return entropy
 
 

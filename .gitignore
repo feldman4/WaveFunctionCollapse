@@ -1,5 +1,6 @@
-.ipynb_checkboints
+.ipynb_checkpoints
 Main.exe
+*.pyc
 
 # Windows image file caches
 Thumbs.db
