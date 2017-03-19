@@ -1,5 +1,5 @@
 import numpy as np
-from collections import Counter, deque
+from collections import Counter, OrderedDict, deque
 from scipy.ndimage import imread
 from scipy.ndimage.morphology import binary_erosion
 
@@ -20,21 +20,30 @@ class SimpleTiledModel(object):
         self.weights = weights
         self.initial_arr = np.array(initial)
         self.offsets = make_offsets(N)
+        self.neighbors = make_offset_dict(N, FMX, FMY)
         self.table = compatibility_table(initial, self.offsets, N)
         
-        self.wave = np.ones((M, FMY, FMX), dtype=bool)
-        self.entropy = self.wave[0] * -1. # cached version
+        self.wave = np.ones((FMY, FMX, M), dtype=bool)
+        self.entropy = self.wave[:,:,0] * -1. # cached version
+        self.support = support_table(FMX, FMY, self.table, periodic=True)
 
-    def update(self):
+    def update(self, support=True):
         """Do one round of collapse and propagate. The point to collapse is
         chosen by minimum entropy. Propagation eliminates incompatible 
         coefficients at the neighbors of the collapsed point. 
 
         If the coefficients at a point change, we keep propagating to all neighbors 
         that are not collapsed, in a breadth-first fashion. 
+
+        Test support:
+        from copy import copy, deepcopy
+        model0 = deepcopy(model)
+        np.random.seed(0); model0.update()
+        model1 = deepcopy(model)
+        np.random.seed(0); model1.update(support=False)
         """
 
-        wavesum = self.wave.sum(axis=0)
+        wavesum = self.wave.sum(axis=2)
         all_false = zip_where(wavesum==0)
         if all_false:
             raise(ValueError('these are all false:' + str(all_false)))
@@ -42,11 +51,74 @@ class SimpleTiledModel(object):
             print 'all points collapsed'
             return True
 
-        i,j = self.collapse()
+        i,j,delta_wave = self.collapse()
 
         # print 'collapsed',(i,j)
-
+        if support:
+            return self.propagate_from_support((i,j), delta_wave)
         return self.propagate_from([(i,j)])
+
+    def propagate_from_support(self, point, delta_wave):
+        if not delta_wave.any():
+            return
+
+        queue = OrderedDict()
+        queue[point] = delta_wave
+        visits = 0
+        while queue:
+            point, delta_wave = queue.popitem(last=False)
+            new_tests = self.propagate_support(point, delta_wave)
+            if new_tests:
+                i,j = point
+                self.entropy[i, j] = -1
+            for point, delta_wave in new_tests:
+                if point in queue:
+                    queue[point] = queue[point] | delta_wave
+                else:
+                    queue[point] = delta_wave
+            visits += 1
+            if visits > 1e7:
+                break
+        # print 'visits', visits
+            
+    def propagate_support(self, point, d_wave):
+        """ Propagate updates based on loss of support from point A to B, rather
+        than incompatibility of B with A. Manages changes in support array.
+        """
+        i,j = point
+
+        # loss in support
+        d_support = self.table[:, :, d_wave, :].sum(axis=2) 
+
+        # all gone?
+        new_d_waves = self.support[:, :, i, j, :] == d_support 
+        new_d_waves &= (d_support > 0)
+
+        self.support[:, :, i, j, :] -= d_support 
+        # assert (self.support>=0).all()
+
+        # for each neighbor, pass on coefficients that totally lost support
+        # need to ignore offset (0,0)
+        neighbors = self.get_neighbors((i,j))
+        queue = []
+        for i2, j2 in neighbors:
+
+            # get the coefficients that were zeroed
+            new_d_wave = new_d_waves[i2-i, j2-j, :] & self.wave[i2,j2]
+            
+
+            # if new_d_wave.all():
+            #     raise ValueError('wtf%s' % (point,))
+
+            self.wave[i2, j2, new_d_wave] = False
+            # if not self.wave[i2, j2].any():
+            #     raise ValueError('wtf2%s' % (point,))
+            
+            # breadth-first
+            if any(new_d_wave):
+                queue.append(((i2, j2), new_d_wave))
+
+        return queue
 
     def propagate_from(self, points):
         """Propagation strategy is to check all neighbors of a point if the 
@@ -59,7 +131,7 @@ class SimpleTiledModel(object):
         while queue:
             (i,j) = queue.popleft()
             neighbors = self.get_neighbors((i,j))
-            neighbors = [(a,b) for a,b in neighbors if self.wave[:,(i+a) % self.FMY,(j+b) % self.FMX].sum()>1]
+            neighbors = [(a,b) for a,b in neighbors if self.wave[a,b,:].sum()>1]
             
             for a,b in neighbors:
                 touched += 1
@@ -69,7 +141,7 @@ class SimpleTiledModel(object):
                     queue.append((a_,b_))
                     modified += 1
                     deleted += changed
-                    if self.wave[:,a_,b_].sum() == 0:
+                    if self.wave[a,b,:].sum() == 0:
                         assert False
 
         # print 'propagation deleted %d coefficients in %d points; touched %d points' % (deleted, modified, touched)
@@ -114,14 +186,13 @@ class SimpleTiledModel(object):
         a,b = offset
         a_,b_ = (a+i) % self.FMY, (b+j) % self.FMX
         
-        # do &= ?
-        coeffs1 = self.wave[:,i,j].nonzero()[0]
-        coeffs2 = self.wave[:,a_,b_].nonzero()[0]
+        coeffs1 = self.wave[i,j,:].nonzero()[0]
+        coeffs2 = self.wave[a+i,b+j,:].nonzero()[0]
 
         # ~2/3 of propagation time spent in this line
         agree = self.table[a, b][np.ix_(coeffs1, coeffs2)].any(axis=0)
 
-        self.wave[coeffs2,a_,b_] = agree
+        self.wave[a+i,b+j,coeffs2] = agree
         changed = (~agree).sum()
 
         if changed:
@@ -130,12 +201,45 @@ class SimpleTiledModel(object):
         return changed
 
 
+    def get_neighbors(self, (i,j)):
+        """Get the neighbors to a point. Returns coordinates, not offsets. 
+
+        Could implement periodic or other boundary conditions.
+        """
+        # self.offsets + [i,j]
+        return self.neighbors[(i,j)]
+        arr = []
+        for a,b in self.offsets:
+            a += i
+            b += j
+            if (a >= 0       and b >= 0 and 
+                    a < self.FMY and b < self.FMX):
+                arr += [(a,b)]
+        return arr
+
+    def collapse(self):
+        """Find the point with lowest entropy and pick a single coefficient.
+        """
+        i,j = self.find_lowest_entropy()
+        coefficients = self.wave[i,j,:].copy()
+        winner = pick_a_true(coefficients, weights=self.weights)
+        self.wave[i,j,:] = False
+        self.wave[i,j,winner] = True
+        self.entropy[i,j] = -1 # flag to recalculate
+        delta_wave = coefficients & ~self.wave[i,j,:]
+        return i,j,delta_wave
+         
+
     def calc_entropy(self, coordinates):
         i,j = coordinates
         entropy = 0
 
-        coefficients = self.wave[:,i,j]        
-        colors = self.initial_arr[coefficients].reshape(-1, self.N**2)
+        # coefficients = self.wave[:,i,j]        
+        # colors = self.initial_arr[coefficients].reshape(-1, self.N**2)
+
+        coefficients = self.wave[i,j,:]
+        nnz = sum(coefficients)
+        colors = self.initial_arr[coefficients].reshape(nnz, self.N**2)
         colors = colors.transpose(1,0)
 
         nnz = coefficients.sum()
@@ -187,7 +291,7 @@ class SimpleTiledModel(object):
         for i in range(self.FMY):
             for j in range(self.FMX):
                 for k in range(self.M):
-                    if self.wave[k,i,j]:
+                    if self.wave[i,j,k]:
                         superposition[i:i+N, j:j+N] += self.initial[k]
                         weights[i:i+N, j:j+N] += 1
 
@@ -273,8 +377,27 @@ def make_offsets(N):
                 offsets += [(i,j)]
     return offsets
 
+def make_offset_dict(N, FMX, FMY, periodic=False):
+    offsets = make_offsets(N)
+    offset_dict = {}
+    for i in range(FMY):
+        for j in range(FMX):
+
+            arr = []
+            for a,b in offsets:
+                a += i
+                b += j
+                if periodic:
+                    arr += [(a,b)]
+                elif  (a >= 0  and b >= 0 and 
+                       a < FMY and b < FMX):
+                    arr += [(a,b)]
+            offset_dict[(i,j)] = arr
+    return offset_dict    
+
 def compatibility_table(tiles, offsets, N):
     """Determine if two tiles are compatible, after applying a (dI, dJ) offset.
+    If offsets doesn't include (0,0), table[0,0,:,:] will be all zero.
     """
     M = len(tiles)
     table = np.zeros((N, N, M, M), dtype=bool)
@@ -286,11 +409,29 @@ def compatibility_table(tiles, offsets, N):
                     
     return table
 
+def support_table(FMX, FMY, table, periodic=True):
+    """Describe initial support along edges between points.
+    support[offsetI, offsetJ, positionI, positionJ, stateI]
+    """
+    # M = len(tiles)
+    # support = np.zeros((N, N, FMY, FMX, M))
+
+    initial_support = table.sum(axis=2).astype(int)
+    initial_support = initial_support[:, :, None, None, :]
+    support = np.tile(initial_support, [1, 1, FMY, FMX, 1])
+
+    if not periodic:
+        support[-1, :, 0, :, :] = 0
+        support[:, -1, :, 0, :] = 0
+        support[1, :, -1, :, :] = 0
+        support[:, 1, :, -1, :] = 0
+
+    return support
+
 def zip_where(arr):
     """
     """
     return zip(*np.where(arr))
-
 
 def subsquare(tile, i, j):
     """Return a rectangle within tile offset by (i,j) and clipped at
@@ -307,3 +448,52 @@ def subsquare(tile, i, j):
         tile = tile[:,j:]
     return tile
 
+
+checkerboardA = \
+    ( ( 0, 1, 0 )
+    , ( 1, 0, 1 )
+    , ( 0, 1, 0 )
+    )
+
+
+checkerboardB = \
+    ( ( 1, 0, 1 )
+    , ( 0, 1, 0 )
+    , ( 1, 0, 1 )
+    )
+
+
+checkerboardC = \
+    ( ( 1, 0, 0 )
+    , ( 0, 1, 1 )
+    , ( 1, 0, 0 )
+    )
+
+
+checkerboardD = \
+    ( ( 0, 0, 1 )
+    , ( 1, 1, 0 )
+    , ( 0, 0, 1 )
+    )
+
+
+checkerboardE = \
+    ( ( 0, 1, 1 )
+    , ( 1, 0, 0 )
+    , ( 0, 1, 1 )
+    )
+
+checkerboardF = \
+    ( ( 1, 1, 0 )
+    , ( 0, 0, 1 )
+    , ( 1, 1, 0 )
+    )
+
+checkerboardABCDEF = \
+    [ checkerboardA
+    , checkerboardB
+    , checkerboardC
+    , checkerboardD
+    , checkerboardE
+    , checkerboardF
+    ]
