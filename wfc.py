@@ -6,6 +6,8 @@ from scipy.ndimage.morphology import binary_erosion
 
 plog2 = [0] + [x*np.log2(x) for x in range(1,1000)]
 
+
+
 class SimpleTiledModel(object):
     def __init__(self, N, FMX, FMY, initial, periodic=False):
         self.N = N = int(N)
@@ -25,7 +27,9 @@ class SimpleTiledModel(object):
         
         self.wave = np.ones((FMY, FMX, M), dtype=bool)
         self.entropy = self.wave[:,:,0] * -1. # cached version
-        self.support = support_table(FMX, FMY, self.table, periodic=True)
+        self.support = support_table(FMX, FMY, self.table, periodic=periodic)
+
+        self.get_neighbors_memo = memodict(lambda x: self.get_neighbors(x))
 
     def update(self, support=True):
         """Do one round of collapse and propagate. The point to collapse is
@@ -53,7 +57,7 @@ class SimpleTiledModel(object):
 
         i,j,delta_wave = self.collapse()
 
-        # print 'collapsed',(i,j)
+        print 'collapsed',(i,j)
         if support:
             return self.propagate_from_support((i,j), delta_wave)
         return self.propagate_from([(i,j)])
@@ -99,13 +103,12 @@ class SimpleTiledModel(object):
 
         # for each neighbor, pass on coefficients that totally lost support
         # need to ignore offset (0,0)
-        neighbors = self.get_neighbors((i,j))
+        neighbors, offsets = self.get_neighbors((i,j))
         queue = []
-        for i2, j2 in neighbors:
+        for (i2, j2), (a,b) in zip(neighbors, offsets):
 
             # get the coefficients that were zeroed
-            new_d_wave = new_d_waves[i2-i, j2-j, :] & self.wave[i2,j2]
-            
+            new_d_wave = new_d_waves[a, b, :] & self.wave[i2,j2]
 
             # if new_d_wave.all():
             #     raise ValueError('wtf%s' % (point,))
@@ -130,92 +133,67 @@ class SimpleTiledModel(object):
         deleted = 0
         while queue:
             (i,j) = queue.popleft()
-            neighbors = self.get_neighbors((i,j))
-            neighbors = [(a,b) for a,b in neighbors if self.wave[a,b,:].sum()>1]
+            neighbors_offsets = zip(*self.get_neighbors((i,j)))
+            neighbors_offsets = [x for x in neighbors_offsets 
+                                   if self.wave[x[0][0],x[0][1],:].sum()>1]
             
-            for a,b in neighbors:
+            for ((i2, j2), (a,b)) in neighbors_offsets:
                 touched += 1
-                changed = self.propagate((i,j), (a,b))
+                changed = self.propagate((i,j), (i2,j2), (a,b))
                 if changed:
-                    a_, b_ = (i+a)%self.FMY, (j+b)%self.FMX
-                    queue.append((a_,b_))
+                    queue.append((i2,j2))
                     modified += 1
                     deleted += changed
-                    if self.wave[a,b,:].sum() == 0:
+                    if self.wave[i2,j2,:].sum() == 0:
                         assert False
 
         # print 'propagation deleted %d coefficients in %d points; touched %d points' % (deleted, modified, touched)
 
+    def propagate(self, coordinates1, coordinates2, offset):
+        """Harmonize tile t1 at coordinates, and neighboring tile t2 at 
+        coordinates plus offset. Returns a bool indicating whether the wave
+        changed. 
+
+        Each coefficient in the wave at t2 must be compatible with at least one 
+        coefficient at t1, or it is set to false. Modifies wave entry for t2 only.
+        """
+
+        i,j = coordinates1
+        i2,j2 = coordinates2
+        a,b = offset
+        
+        coeffs1 = self.wave[i,j,:].nonzero()[0]
+        coeffs2 = self.wave[i2,j2,:].nonzero()[0]
+
+        # ~2/3 of propagation time spent in this line
+        agree = self.table[a, b][np.ix_(coeffs1, coeffs2)].any(axis=0)
+
+        self.wave[i2,j2,coeffs2] = agree
+        changed = (~agree).sum()
+
+        if changed:
+            self.entropy[i2,j2] = -1 # flag to recalculate
+
+        return changed
 
     def get_neighbors(self, (i,j)):
-        """Get the neighbors to a point. Returns offsets, not coordinates. 
+        """Get the neighbors to a point. Returns neighbors and offsets. 
 
-        Could implement periodic or other boundary conditions.
+        In the periodic case the offset is the original offset before applying
+        boundary conditions.
         """
         if self.periodic:
-            return self.offsets
+            neighbors = [((i + a) % self.FMY, (j + b) % self.FMX) 
+                            for a,b in self.offsets]
+            return neighbors, self.offsets
 
         arr = []
         for a,b in self.offsets:
             if (a + i >= 0       and b + j >= 0 and 
                 a + i < self.FMY and b + j< self.FMX):
-                arr += [(a,b)]
-        return arr
+                arr += [[(i+a, j+b), (a,b)]]
 
-    def collapse(self):
-        """Find the point with lowest entropy and pick a single coefficient.
-        """
-        i,j = self.find_lowest_entropy()
-        coefficients = self.wave[:,i,j]
-        winner = pick_a_true(coefficients, weights=self.weights)
-        self.wave[:,i,j] = False
-        self.wave[winner,i,j] = True
-        self.entropy[i,j] = -1 # flag to recalculate
-        return i,j
-         
-    def propagate(self, coordinates, offset):
-        """Harmonize tile t1 at coordinates, and neighboring tile t2 at 
-        coordinates plus offset. Returns a bool indicating whether the wave
-        changed.
-
-        Each coefficient in the wave at t2 must be compatible with at least one 
-        coefficient at t1, or it is set to false.
-        """
-
-        i,j = coordinates
-        a,b = offset
-        a_,b_ = (a+i) % self.FMY, (b+j) % self.FMX
-        
-        coeffs1 = self.wave[i,j,:].nonzero()[0]
-        coeffs2 = self.wave[a+i,b+j,:].nonzero()[0]
-
-        # ~2/3 of propagation time spent in this line
-        agree = self.table[a, b][np.ix_(coeffs1, coeffs2)].any(axis=0)
-
-        self.wave[a+i,b+j,coeffs2] = agree
-        changed = (~agree).sum()
-
-        if changed:
-            self.entropy[a_,b_] = -1 # flag to recalculate
-
-        return changed
-
-
-    def get_neighbors(self, (i,j)):
-        """Get the neighbors to a point. Returns coordinates, not offsets. 
-
-        Could implement periodic or other boundary conditions.
-        """
-        # self.offsets + [i,j]
-        return self.neighbors[(i,j)]
-        arr = []
-        for a,b in self.offsets:
-            a += i
-            b += j
-            if (a >= 0       and b >= 0 and 
-                    a < self.FMY and b < self.FMX):
-                arr += [(a,b)]
-        return arr
+        return zip(*arr)
 
     def collapse(self):
         """Find the point with lowest entropy and pick a single coefficient.
@@ -227,8 +205,7 @@ class SimpleTiledModel(object):
         self.wave[i,j,winner] = True
         self.entropy[i,j] = -1 # flag to recalculate
         delta_wave = coefficients & ~self.wave[i,j,:]
-        return i,j,delta_wave
-         
+        return i,j,delta_wave  
 
     def calc_entropy(self, coordinates):
         i,j = coordinates
@@ -252,7 +229,6 @@ class SimpleTiledModel(object):
         entropy = entropy/nnz + plog2[nnz]
         return entropy
 
-
     def get_entropy(self, recalculate=True):
         """Given (M x X x Y) boolean wavefunction and initial states, return
         an (X x Y) array of entropy at each position.
@@ -266,7 +242,6 @@ class SimpleTiledModel(object):
             self.entropy[i,j] = self.calc_entropy((i,j))
 
         return self.entropy
-
 
     def find_lowest_entropy(self):
         """Return the index of the first position with the lowest entropy. 
@@ -300,8 +275,15 @@ class SimpleTiledModel(object):
 
         return superposition
 
-
 # UTILITIES
+
+def memodict(f):
+    """ Memoization decorator for a function taking a single argument """
+    class memodict(dict):
+        def __missing__(self, key):
+            ret = self[key] = f(key)
+            return ret 
+    return memodict().__getitem__
 
 def rotate(tile, cardinality):
 
@@ -316,7 +298,6 @@ def rotate(tile, cardinality):
             arr += [np.rot90(arr[-1])]
 
     return [array_to_tuple(t) for t in arr]
-
 
 def array_to_tuple(array):
     return tuple(tuple(x) for x in array)
@@ -341,7 +322,6 @@ def border_points(arr):
     
     border = ~binary_erosion(arr) & arr
     return zip_where(border)
-
 
 def shannon_entropy(xs):
     """Compute Shannon entropy of a sequence, in bits.
@@ -413,9 +393,8 @@ def support_table(FMX, FMY, table, periodic=True):
     """Describe initial support along edges between points.
     support[offsetI, offsetJ, positionI, positionJ, stateI]
     """
-    # M = len(tiles)
-    # support = np.zeros((N, N, FMY, FMX, M))
 
+    # sum over origin state to get amount of support in the destination state
     initial_support = table.sum(axis=2).astype(int)
     initial_support = initial_support[:, :, None, None, :]
     support = np.tile(initial_support, [1, 1, FMY, FMX, 1])
@@ -455,13 +434,11 @@ checkerboardA = \
     , ( 0, 1, 0 )
     )
 
-
 checkerboardB = \
     ( ( 1, 0, 1 )
     , ( 0, 1, 0 )
     , ( 1, 0, 1 )
     )
-
 
 checkerboardC = \
     ( ( 1, 0, 0 )
@@ -469,13 +446,11 @@ checkerboardC = \
     , ( 1, 0, 0 )
     )
 
-
 checkerboardD = \
     ( ( 0, 0, 1 )
     , ( 1, 1, 0 )
     , ( 0, 0, 1 )
     )
-
 
 checkerboardE = \
     ( ( 0, 1, 1 )
