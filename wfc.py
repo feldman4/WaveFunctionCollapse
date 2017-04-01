@@ -29,8 +29,6 @@ class SimpleTiledModel(object):
         self.entropy = self.wave[:,:,0] * -1. # cached version
         self.support = support_table(FMX, FMY, self.table, periodic=periodic)
 
-        self.get_neighbors_memo = memodict(lambda x: self.get_neighbors(x))
-
     def update(self, support=True):
         """Do one round of collapse and propagate. The point to collapse is
         chosen by minimum entropy. Propagation eliminates incompatible 
@@ -57,7 +55,7 @@ class SimpleTiledModel(object):
 
         i,j,delta_wave = self.collapse()
 
-        print 'collapsed',(i,j)
+        # print 'collapsed',(i,j)
         if support:
             return self.propagate_from_support((i,j), delta_wave)
         return self.propagate_from([(i,j)])
@@ -68,23 +66,19 @@ class SimpleTiledModel(object):
 
         queue = OrderedDict()
         queue[point] = delta_wave
-        visits = 0
+
         while queue:
-            point, delta_wave = queue.popitem(last=False)
-            new_tests = self.propagate_support(point, delta_wave)
-            if new_tests:
-                i,j = point
-                self.entropy[i, j] = -1
+            (i,j), delta_wave = queue.popitem(last=False)
+            self.entropy[i, j] = -1
+
+            new_tests = self.propagate_support((i,j), delta_wave)
+            
             for point, delta_wave in new_tests:
                 if point in queue:
                     queue[point] = queue[point] | delta_wave
                 else:
                     queue[point] = delta_wave
-            visits += 1
-            if visits > 1e7:
-                break
-        # print 'visits', visits
-            
+ 
     def propagate_support(self, point, d_wave):
         """ Propagate updates based on loss of support from point A to B, rather
         than incompatibility of B with A. Manages changes in support array.
@@ -110,15 +104,9 @@ class SimpleTiledModel(object):
             # get the coefficients that were zeroed
             new_d_wave = new_d_waves[a, b, :] & self.wave[i2,j2]
 
-            # if new_d_wave.all():
-            #     raise ValueError('wtf%s' % (point,))
-
-            self.wave[i2, j2, new_d_wave] = False
-            # if not self.wave[i2, j2].any():
-            #     raise ValueError('wtf2%s' % (point,))
-            
             # breadth-first
             if any(new_d_wave):
+                self.wave[i2, j2, new_d_wave] = False
                 queue.append(((i2, j2), new_d_wave))
 
         return queue
@@ -127,12 +115,16 @@ class SimpleTiledModel(object):
         """Propagation strategy is to check all neighbors of a point if the 
         point is changed. 
         """
-        queue = deque(points)
+        # store points in a deque set
+        queue_set = set(points) 
+        queue = deque(queue_set)
+
         modified = 0
         touched = 0
         deleted = 0
         while queue:
             (i,j) = queue.popleft()
+            queue_set.remove((i,j))
             neighbors_offsets = zip(*self.get_neighbors((i,j)))
             neighbors_offsets = [x for x in neighbors_offsets 
                                    if self.wave[x[0][0],x[0][1],:].sum()>1]
@@ -141,7 +133,9 @@ class SimpleTiledModel(object):
                 touched += 1
                 changed = self.propagate((i,j), (i2,j2), (a,b))
                 if changed:
-                    queue.append((i2,j2))
+                    if (i2,j2) not in queue_set:
+                        queue.append((i2,j2))
+                        queue_set.add((i2,j2))
                     modified += 1
                     deleted += changed
                     if self.wave[i2,j2,:].sum() == 0:
@@ -215,11 +209,11 @@ class SimpleTiledModel(object):
         # colors = self.initial_arr[coefficients].reshape(-1, self.N**2)
 
         coefficients = self.wave[i,j,:]
-        nnz = sum(coefficients)
+        nnz = coefficients.sum()
         colors = self.initial_arr[coefficients].reshape(nnz, self.N**2)
         colors = colors.transpose(1,0)
 
-        nnz = coefficients.sum()
+        
 
         for pixel_coefs in colors: 
             for c in np.bincount(pixel_coefs):
@@ -274,6 +268,21 @@ class SimpleTiledModel(object):
         superposition = superposition / weights.astype(float)
 
         return superposition
+
+    def complete(self, support=True):
+        i = 0
+
+        while (self.wave.sum(axis=2) > 1).any():
+            self.update(support=support)
+            i += 1
+
+        if (self.wave.sum(axis=2) != 1).any():
+            print 'contradiction after', n, 'updates'
+            return None
+
+        return i
+
+
 
 # UTILITIES
 
