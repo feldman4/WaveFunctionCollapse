@@ -29,6 +29,7 @@ class SimpleTiledModel(object):
         self.entropy = self.wave[:,:,0] * -1. # cached version
         self.support = support_table(FMX, FMY, self.table, periodic=periodic)
 
+
     def update(self, support=True):
         """Do one round of collapse and propagate. The point to collapse is
         chosen by minimum entropy. Propagation eliminates incompatible 
@@ -126,8 +127,9 @@ class SimpleTiledModel(object):
             (i,j) = queue.popleft()
             queue_set.remove((i,j))
             neighbors_offsets = zip(*self.get_neighbors((i,j)))
-            neighbors_offsets = [x for x in neighbors_offsets 
-                                   if self.wave[x[0][0],x[0][1],:].sum()>1]
+            # fails to identify contradictions
+            # neighbors_offsets = [x for x in neighbors_offsets 
+            #                        if self.wave[x[0][0],x[0][1],:].sum()>1]
             
             for ((i2, j2), (a,b)) in neighbors_offsets:
                 touched += 1
@@ -246,7 +248,8 @@ class SimpleTiledModel(object):
         x = H + collapsed*99999
         minima = zip_where(x==x.min())
     
-        return minima[np.random.choice(len(minima))]
+        # return minima[np.random.choice(len(minima))]
+        return minima[choice(len(minima))]
 
     def get_superposition(self, color_map=None):
         N = self.N
@@ -277,7 +280,7 @@ class SimpleTiledModel(object):
             i += 1
 
         if (self.wave.sum(axis=2) != 1).any():
-            print 'contradiction after', n, 'updates'
+            print 'contradiction after', i, 'updates'
             return None
 
         return i
@@ -349,10 +352,12 @@ def pick_a_true(bools, weights=None):
     """
     index = np.where(bools)[0]
     if weights is None:
-        return np.random.choice(index)
+        # return np.random.choice(index)
+        return choice(index)
     weights = np.array(weights) * 1.
     weights = weights[index]
-    return np.random.choice(index, p=weights/weights.sum())
+    # return np.random.choice(index, p=weights/weights.sum())
+    return choice(index, p=weights/weights.sum())
 
 def make_offsets(N):
     """Produce a list of (dI, dJ) offsets for a tile of width N.
@@ -436,6 +441,27 @@ def subsquare(tile, i, j):
         tile = tile[:,j:]
     return tile
 
+def choice(*args, **kwargs):
+    # return np.random.choice(*args, **kwargs)
+    return choice_(*args, **kwargs)
+
+def choice_(xs, p=None):
+    if isinstance(xs, int):
+        xs = range(xs)
+    if not (p is None):
+        cs = np.cumsum(p)
+        n = getRandom() * max(cs)
+        for i,p_ in enumerate(cs):
+            if p_ > n:
+                break 
+        return xs[i]
+    return xs[int(getRandom() * len(xs))]
+
+ticker = [0]
+def getRandom(ticker=ticker):
+    ticker[0] += 1
+    i = ticker[0]
+    return randos[i % len(randos)]
 
 checkerboardA = \
     ( ( 0, 1, 0 )
@@ -481,3 +507,39 @@ checkerboardABCDEF = \
     , checkerboardE
     , checkerboardF
     ]
+
+
+randos= [3.57095269e-01,   6.16476608e-01,   4.42510505e-01,
+         5.75952352e-01,   8.48412660e-02,   2.23283599e-01,
+         2.17890220e-01,   8.25591994e-01,   4.60241400e-01,
+         5.45692371e-01,   7.87609761e-01,   7.39860852e-01,
+         7.20097577e-01,   7.97826275e-01,   8.81896387e-01,
+         8.21604693e-01,   3.05941324e-01,   7.45375147e-01,
+         3.88219250e-01,   4.69667654e-01,   7.10044376e-01,
+         3.65126628e-01,   9.27250328e-01,   7.32187105e-01,
+         2.43837089e-01,   6.79664391e-01,   5.95789013e-02,
+         8.56288178e-01,   4.91198192e-01,   5.32594697e-01,
+         1.51655961e-01,   8.04582107e-01,   6.13809025e-01,
+         2.49226914e-01,   3.95723003e-01,   5.60075997e-01,
+         5.55833098e-01,   5.52143342e-01,   4.62360874e-01,
+         6.70656181e-01,   8.83678959e-01,   4.79704318e-01,
+         4.16099641e-01,   2.51388180e-01,   9.46254162e-01,
+         9.83089900e-01,   5.51854839e-01,   5.49876400e-01,
+         4.63910645e-01,   3.85484346e-01,   4.07507369e-01,
+         2.85149566e-01,   8.52476098e-04,   4.34611836e-01,
+         5.87336538e-01,   5.22781746e-01,   6.81185355e-01,
+         8.81993566e-02,   6.29008279e-01,   7.79468082e-01,
+         1.96662091e-01,   4.81846389e-01,   3.76311610e-01,
+         4.76825510e-02,   3.16277339e-01,   6.49173972e-01,
+         2.56410886e-01,   4.53257301e-01,   1.30402898e-01,
+         8.79967400e-01,   9.91131913e-01,   9.53496921e-02,
+         7.80540215e-01,   3.18601116e-01,   4.35788740e-01,
+         6.61891353e-01,   3.22648602e-01,   2.45114552e-02,
+         7.01992141e-01,   7.96804980e-01,   1.22742024e-01,
+         8.50894394e-01,   9.07070546e-01,   1.97922313e-01,
+         8.70998784e-02,   8.67761386e-01,   8.14737827e-01,
+         3.03883303e-01,   2.56563996e-02,   7.59538650e-01,
+         6.38786620e-01,   5.64430503e-01,   9.09495514e-01,
+         6.76696644e-01,   2.83605500e-01,   4.49995756e-01,
+         9.92281843e-01,   2.53107448e-01,   8.84983935e-01,
+         3.44674163e-01]
